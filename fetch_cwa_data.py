@@ -223,39 +223,113 @@ def parse_weather_data(raw_json: Dict[str, Any], include_counties: bool = True) 
     return df_final
 
 
-def main():
-    """執行 ETL Pipeline：驗證階段二 (資料採集) 與 階段三 (資料清洗)。"""
-    try:
-        api_key = get_api_key()
-        masked_key = f"{api_key[:8]}...{api_key[-4:]}"
-        logger.info(f"使用 API Key: {masked_key}")
+# ==========================================
+# 階段四：SQLite 資料庫設計與落庫 (Storage & Loading)
+# ==========================================
 
-        # 階段二：取得原始 JSON
-        data = fetch_weather_data(api_key=api_key)
+DB_PATH = "data.db"
 
-        # 階段三：資料剖析與清洗
-        df = parse_weather_data(data, include_counties=True)
 
-        print("\n" + "=" * 65)
-        print("  🌤️ 中央氣象署 (CWA) 資料清洗 (Phase 3) 成果展示")
-        print("=" * 65)
-        print(f"  • 總預報記錄數 : {len(df)} 筆")
-        print(f"  • 不重複地區數 : {df['regionName'].nunique()} 個 (含 7 大分區與 22 縣市)")
-        dates = sorted(df["dataDate"].unique())
-        print(f"  • 預報日期範圍 : {dates[0]} 至 {dates[-1]} (共 {len(dates)} 天)")
-        print("\n--- 【分區預報 (中部地區範例)】---")
-        sample_central = df[df["regionName"] == "中部地區"]
-        print(sample_central.to_string(index=False))
+def init_database(db_path: str = DB_PATH) -> None:
+    """
+    初始化 SQLite 資料庫與建立 TemperatureForecasts 資料表。
+    設定 UNIQUE(regionName, dataDate) 以支援防重複寫入 (冪等性)。
+    """
+    import sqlite3
+    logger.info(f"正在初始化 SQLite 資料庫 [{db_path}]...")
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS TemperatureForecasts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                regionName TEXT NOT NULL,
+                dataDate TEXT NOT NULL,
+                minT REAL NOT NULL,
+                maxT REAL NOT NULL,
+                UNIQUE(regionName, dataDate) ON CONFLICT REPLACE
+            );
+        """)
+        conn.commit()
+    logger.info("資料庫與資料表結構初始化完成。")
 
-        print("\n--- 【各分區最新首日預報速覽】---")
-        first_date = dates[0]
-        region_first_day = df[
-            (df["dataDate"] == first_date) & 
-            (df["regionName"].isin(REGION_MAPPING.keys()))
+
+def save_to_database(df: pd.DataFrame, db_path: str = DB_PATH) -> int:
+    """
+    將清洗後的 DataFrame 資料寫入 SQLite 資料庫。
+    使用 INSERT OR REPLACE INTO 確保重複執行不產生重複數據。
+
+    :param df: 包含 regionName, dataDate, minT, maxT 之 DataFrame
+    :param db_path: 資料庫檔案路徑
+    :return: 成功寫入或更新的筆數
+    """
+    import sqlite3
+    init_database(db_path)
+
+    logger.info(f"正在將 {len(df)} 筆預報數據寫入資料庫 [{db_path}]...")
+    records_to_insert = [
+        (row["regionName"], row["dataDate"], float(row["minT"]), float(row["maxT"]))
+        for _, row in df.iterrows()
+    ]
+
+    sql = """
+        INSERT INTO TemperatureForecasts (regionName, dataDate, minT, maxT)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(regionName, dataDate) DO UPDATE SET
+            minT = excluded.minT,
+            maxT = excluded.maxT;
+    """
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.executemany(sql, records_to_insert)
+        conn.commit()
+
+    logger.info(f"成功落庫 {len(records_to_insert)} 筆數據至 [{db_path}]！")
+    return len(records_to_insert)
+
+
+def verify_database(db_path: str = DB_PATH) -> None:
+    """驗證資料庫內容並輸出檢查報告。"""
+    import sqlite3
+    logger.info(f"正在驗證資料庫 [{db_path}] 落庫內容...")
+    with sqlite3.connect(db_path) as conn:
+        total_count = conn.execute("SELECT COUNT(*) FROM TemperatureForecasts;").fetchone()[0]
+        distinct_regions = [
+            row[0] for row in conn.execute(
+                "SELECT DISTINCT regionName FROM TemperatureForecasts ORDER BY regionName;"
+            ).fetchall()
         ]
-        print(region_first_day[["regionName", "dataDate", "minT", "maxT"]].to_string(index=False))
-        print("=" * 65 + "\n")
+        sample_central = pd.read_sql_query(
+            "SELECT * FROM TemperatureForecasts WHERE regionName = '中部地區' ORDER BY dataDate ASC;",
+            conn
+        )
 
+    print("\n" + "=" * 65)
+    print("  🗄️ SQLite 資料庫 (Phase 4) 落庫驗證結果")
+    print("=" * 65)
+    print(f"  • 資料庫路徑   : {os.path.abspath(db_path)}")
+    print(f"  • 總儲存筆數   : {total_count} 筆")
+    print(f"  • 涵蓋地區數   : {len(distinct_regions)} 個")
+    print(f"  • 資料庫地區清單: {', '.join(distinct_regions[:8])} ...")
+    print("\n--- 【SQL 查詢驗證：中部地區資料】---")
+    print(sample_central.to_string(index=False))
+    print("=" * 65 + "\n")
+
+
+def run_etl_pipeline(db_path: str = DB_PATH) -> pd.DataFrame:
+    """執行完整 ETL 管線：採集 ➔ 清洗 ➔ 落庫。"""
+    api_key = get_api_key()
+    raw_data = fetch_weather_data(api_key=api_key)
+    df = parse_weather_data(raw_data, include_counties=True)
+    save_to_database(df, db_path=db_path)
+    verify_database(db_path=db_path)
+    return df
+
+
+def main():
+    """執行完整 ETL 管線：階段二至階段四。"""
+    try:
+        run_etl_pipeline(DB_PATH)
     except Exception as e:
         logger.error(f"ETL 流程發生錯誤: {e}", exc_info=True)
         sys.exit(1)
@@ -263,3 +337,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
