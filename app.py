@@ -1,9 +1,7 @@
 """
 app.py
-Taiwan Weather Forecast — 台灣天氣預報互動式 Web 儀表板
-階段五：Streamlit 互動儀表板 (Web Dashboard)
-階段六：Folium 地理空間視覺化 (Map Integration)
-階段七：程式品質優化與防呆 (Code Quality & Robustness)
+Taiwan Weather Forecast — 台灣即時氣象地圖儀表板
+參考 taiwan-weather-map.vercel.app 現代深色玻璃擬態 (Dark Glassmorphism & Windy Style)
 """
 
 import os
@@ -78,98 +76,153 @@ COORDINATES: Dict[str, Tuple[float, float]] = {
 }
 
 
-def get_temperature_color(avg_temp: float) -> str:
-    """依據平均氣溫回傳對應的色票代碼 (單元 17 色階規格)。"""
-    if avg_temp < 20.0:
-        return "#1E88E5"  # 藍色 (偏涼、寒冷)
-    elif avg_temp <= 25.0:
-        return "#43A047"  # 綠色 (舒適、宜人)
-    elif avg_temp <= 30.0:
-        return "#FDD835"  # 黃色 (暖熱、晴朗)
+def get_windy_color(temp: float) -> str:
+    """類 Windy 漸層光譜色票函數 (對應 taiwan-weather-map 漸層色階)。"""
+    if temp < 10.0:
+        return "#2c7bb6"
+    elif temp < 15.0:
+        return "#5aa2cf"
+    elif temp < 20.0:
+        return "#abd9e9"
+    elif temp < 24.0:
+        return "#7fcdbb"
+    elif temp < 28.0:
+        return "#d9ef8b"
+    elif temp < 30.0:
+        return "#fee08b"
+    elif temp < 32.0:
+        return "#fdae61"
+    elif temp < 34.0:
+        return "#f46d43"
     else:
-        return "#E53935"  # 紅色 (炎熱、注意防曬)
+        return "#d73027"
 
 
 def get_comfort_desc(min_t: float, max_t: float) -> str:
     """依據平均溫計算天氣舒適度敘述。"""
     avg = (min_t + max_t) / 2
     if avg < 20:
-        return "🔵 偏涼注意保暖"
+        return "偏涼注意保暖"
     elif avg <= 25:
-        return "🟢 氣溫舒適宜人"
+        return "氣溫舒適宜人"
     elif avg <= 30:
-        return "🟡 稍有暖熱"
+        return "暖熱稍有出汗"
     else:
-        return "🔴 炎熱注意防曬"
+        return "炎熱注意防曬"
 
 
 # ==========================================
 # 1. 頁面基本設定 (Page Config)
 # ==========================================
 st.set_page_config(
-    page_title="Taiwan Weather Forecast — 台灣氣象預報",
+    page_title="台灣即時氣象地圖 — Taiwan Weather Map",
     page_icon="🌤️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 自訂 CSS 提升介面質感
+# 注入深色玻璃擬態 (Dark Glassmorphism) 核心 CSS
 st.markdown("""
 <style>
-    .main-title {
+    /* 全域深色背景微調 */
+    .stApp {
+        background-color: #030712 !important;
+        color: #F3F4F6 !important;
+    }
+    
+    /* 頂部標題 */
+    .windy-title {
         font-size: 2.2rem;
-        font-weight: 700;
-        margin-bottom: 0.2rem;
-        background: linear-gradient(120deg, #1E88E5, #00C9FF);
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        background: linear-gradient(135deg, #38BDF8 0%, #818CF8 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
+        margin-bottom: 4px;
     }
-    .sub-title {
-        color: #718096;
-        font-size: 1.05rem;
-        margin-bottom: 1.2rem;
-    }
-    .mentor-quote {
-        background: rgba(30, 136, 229, 0.08);
-        border-left: 4px solid #1E88E5;
-        padding: 0.75rem 1rem;
-        border-radius: 4px;
-        margin-bottom: 1.5rem;
+    .windy-subtitle {
+        color: #94A3B8;
         font-size: 0.95rem;
-        color: #2D3748;
+        margin-bottom: 14px;
+    }
+    .windy-quote {
+        background: rgba(15, 23, 42, 0.85);
+        border: 1px solid rgba(56, 189, 248, 0.25);
+        border-left: 4px solid #38BDF8;
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-size: 0.88rem;
+        color: #E2E8F0;
+        margin-bottom: 18px;
+        backdrop-filter: blur(12px);
+    }
+    
+    /* 指標卡片美化 */
+    [data-testid="stMetric"] {
+        background: rgba(15, 23, 42, 0.75) !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        border-radius: 10px !important;
+        padding: 12px 16px !important;
+        backdrop-filter: blur(12px) !important;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4) !important;
     }
     [data-testid="stMetricValue"] {
-        font-size: 1.8rem !important;
-        font-weight: 700;
+        font-size: 1.9rem !important;
+        font-weight: 800 !important;
+        color: #38BDF8 !important;
     }
-    .legend-box {
+    [data-testid="stMetricLabel"] {
+        color: #94A3B8 !important;
+        font-size: 0.85rem !important;
+    }
+
+    /* 漸層色階條樣式 (Windy Spectral Colorbar) */
+    .windy-legend-container {
+        background: rgba(15, 23, 42, 0.85);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 10px;
+        padding: 12px 18px;
+        margin-bottom: 16px;
+        backdrop-filter: blur(12px);
+    }
+    .windy-legend-bar {
+        height: 10px;
+        width: 100%;
+        border-radius: 9999px;
+        background: linear-gradient(to right, #2c7bb6, #5aa2cf, #abd9e9, #7fcdbb, #d9ef8b, #fee08b, #fdae61, #f46d43, #d73027);
+        margin: 6px 0;
+        box-shadow: 0 0 10px rgba(0,0,0,0.5);
+    }
+    .windy-legend-labels {
         display: flex;
-        gap: 12px;
-        flex-wrap: wrap;
-        margin-bottom: 12px;
-        padding: 8px 12px;
-        background: #F7FAFC;
-        border-radius: 6px;
-        border: 1px solid #E2E8F0;
+        justify-content: space-between;
+        font-size: 11px;
+        color: #94A3B8;
+        font-family: monospace;
     }
-    .legend-item {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        font-size: 0.88rem;
+
+    /* 頁籤微調 */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: transparent;
     }
-    .legend-badge {
-        width: 14px;
-        height: 14px;
-        border-radius: 50%;
-        display: inline-block;
+    .stTabs [data-baseweb="tab"] {
+        background-color: rgba(255, 255, 255, 0.05);
+        border-radius: 8px 8px 0 0;
+        color: #94A3B8;
+        padding: 8px 18px;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: rgba(14, 165, 233, 0.15) !important;
+        color: #38BDF8 !important;
+        border-bottom: 2px solid #38BDF8 !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ==========================================
-# 2. 資料庫安全讀取函式 (Data Access with Cache)
+# 2. 資料讀取函式 (Data Access with Cache)
 # ==========================================
 @st.cache_data(ttl=600)
 def load_data_from_db(db_path: str = DB_PATH) -> pd.DataFrame:
@@ -201,7 +254,6 @@ def load_data_from_db(db_path: str = DB_PATH) -> pd.DataFrame:
     return df
 
 
-# 載入預報資料
 df_all = load_data_from_db(DB_PATH)
 
 
@@ -209,9 +261,8 @@ df_all = load_data_from_db(DB_PATH)
 # 3. 側邊欄 (Sidebar) 控制中心
 # ==========================================
 with st.sidebar:
-    st.image("https://img.icons8.com/clouds/200/sun.png", width=110)
-    st.title("氣象資料中心")
-    st.caption("AIoT 創新微課程實戰專案 (HW1)")
+    st.markdown("### 🛰️ 氣象控制台")
+    st.caption("類 Windy 風格即時地圖系統")
     st.markdown("---")
 
     # 資料庫指標展示
@@ -229,6 +280,16 @@ with st.sidebar:
 
     st.markdown("---")
 
+    # 模擬圖層切換 (類 taiwan-weather-map 側邊面板)
+    st.markdown("##### 📌 觀測圖層")
+    st.button("🌡️ 氣溫預報 (目前使用中)", use_container_width=True, disabled=True)
+    if st.button("🌧️ 即時雨量 (準備接入)", use_container_width=True):
+        st.toast("雨量雷達資料集準備接入中！")
+    if st.button("💨 風速風向 (準備接入)", use_container_width=True):
+        st.toast("風場粒子模擬資料集準備接入中！")
+
+    st.markdown("---")
+
     # 手動更新資料按鈕
     if st.button("🔄 立即重新擷取 CWA 資料", use_container_width=True):
         if run_etl_pipeline:
@@ -243,29 +304,16 @@ with st.sidebar:
         else:
             st.error("找不到 ETL 模組。")
 
-    st.markdown("---")
-    st.markdown(
-        """
-        **核心實作技術鏈**：
-        - 🌐 中央氣象署 CWA API (Requests)
-        - 🐍 Python + Pandas (JSON 清洗)
-        - 🗄️ SQLite3 (關聯資料庫持久化)
-        - 📊 Streamlit + Altair (互動圖表)
-        - 🗺️ Folium (台灣地理空間視覺化)
-        """
-    )
-
 
 # ==========================================
-# 4. 主畫面橫幅與介紹 (Header)
+# 4. 主畫面橫幅 (Header)
 # ==========================================
-st.markdown('<div class="main-title">🌤️ Taiwan Weather Forecast — 台灣天氣預報儀表板</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">用程式探索天氣 · 用資料看見台灣 · 用 AI 實現更多可能</div>', unsafe_allow_html=True)
+st.markdown('<div class="windy-title">🌤️ 台灣即時氣象地圖</div>', unsafe_allow_html=True)
+st.markdown('<div class="windy-subtitle">中央氣象署開放資料即時視覺化地圖（類 Windy 深色玻璃擬態風格）</div>', unsafe_allow_html=True)
 
 st.markdown("""
-<div class="mentor-quote">
+<div class="windy-quote">
   💡 <b>煥哥心法引言</b>：<i>「技術可以解決問題，但更重要的是用技術創造更好的未來！」</i>
-  <br><small>專案循序遵循 24 單元實戰地圖：自 CWA Open Data API 串接、SQLite 冪等入庫至 Streamlit 互動視覺化與 Folium 地圖。</small>
 </div>
 """, unsafe_allow_html=True)
 
@@ -275,23 +323,127 @@ if df_all.empty:
 
 
 # ==========================================
-# 5. 分頁佈局：圖表趨勢 vs 地理地圖 (Tabs)
+# 5. 分頁佈局：互動地圖 (預設焦點) vs 區域走勢 vs 系統規格
 # ==========================================
-tab_trend, tab_map, tab_arch = st.tabs([
-    "📈 區域氣溫趨勢分析 (Regional Trends)",
-    "🗺️ 台灣地圖視覺化 (Interactive Map)",
+tab_map, tab_trend, tab_arch = st.tabs([
+    "🗺️ 即時地圖視覺化 (Interactive Map)",
+    "📈 區域走勢與數據明細 (Trends & Table)",
     "⚙️ 系統架構與規格 (Architecture)"
 ])
 
 
 # ------------------------------------------
-# TAB 1: 區域氣溫趨勢分析 (Phase 5)
+# TAB 1: 類 Windy 互動地圖 (Phase 6 強化版)
+# ------------------------------------------
+with tab_map:
+    # Windy 光譜色階說明條
+    st.markdown("""
+    <div class="windy-legend-container">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span style="font-size: 0.8rem; font-weight: 700; color: #E2E8F0;">氣溫色階圖例 (°C)</span>
+        <span style="font-size: 0.72rem; color: #64748B;">Windy Colormap</span>
+      </div>
+      <div class="windy-legend-bar"></div>
+      <div class="windy-legend-labels">
+        <span>5°</span>
+        <span>10°</span>
+        <span>15°</span>
+        <span>20°</span>
+        <span>24°</span>
+        <span>28°</span>
+        <span>32°</span>
+        <span>36°+</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    available_dates = sorted(df_all["dataDate"].unique().tolist())
+
+    col_map1, col_map2 = st.columns([1, 1])
+    with col_map1:
+        selected_date = st.selectbox(
+            "📅 選擇預報日期 (Select Date)：",
+            options=available_dates,
+            index=0,
+            help="切換日期以查看該日全台各地溫度分佈"
+        )
+    with col_map2:
+        layer_mode = st.radio(
+            "選擇標記圖層：",
+            options=["7 大分區中心標記", "22 縣市詳細標記", "全部顯示"],
+            index=0,
+            horizontal=True
+        )
+
+    # 依選定日期篩選數據
+    df_date = df_all[df_all["dataDate"] == selected_date].copy()
+    df_date["avgT"] = ((df_date["minT"] + df_date["maxT"]) / 2).round(1)
+
+    if layer_mode == "7 大分區中心標記":
+        df_map_points = df_date[df_date["regionName"].isin(REGION_MAPPING.keys())]
+    elif layer_mode == "22 縣市詳細標記":
+        df_map_points = df_date[~df_date["regionName"].isin(REGION_MAPPING.keys())]
+    else:
+        df_map_points = df_date
+
+    # 建立 Folium 地圖實例 (採用 CartoDB dark_matter 深色地圖)
+    m = folium.Map(
+        location=[23.75, 120.95],
+        zoom_start=7,
+        tiles="CartoDB dark_matter",
+        control_scale=True
+    )
+
+    # 在地圖上逐一添加發光圓點標記
+    for _, row in df_map_points.iterrows():
+        reg_name = row["regionName"]
+        min_temp = row["minT"]
+        max_temp = row["maxT"]
+        avg_temp = row["avgT"]
+        color = get_windy_color(avg_temp)
+        desc = get_comfort_desc(min_temp, max_temp)
+
+        coord = COORDINATES.get(reg_name)
+        if not coord:
+            continue
+
+        popup_html = f"""
+        <div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; min-width: 170px; color: #F8FAFC;">
+          <h4 style="margin: 0 0 6px 0; color: #38BDF8; border-bottom: 1px solid rgba(255,255,255,0.2); padding-bottom: 4px;">📍 {reg_name}</h4>
+          <div style="font-size: 13px; line-height: 1.6;">
+            <b>日期：</b>{selected_date}<br>
+            <b>最低溫：</b><span style="color: #38BDF8; font-weight: 700;">{min_temp} °C</span><br>
+            <b>最高溫：</b><span style="color: #F87171; font-weight: 700;">{max_temp} °C</span><br>
+            <b>平均溫：</b><span style="color: #FBBF24; font-weight: 700;">{avg_temp} °C</span><br>
+            <div style="margin-top: 6px; padding: 3px 6px; border-radius: 4px; background: {color}; color: #FFFFFF; font-size: 11px; text-align: center; font-weight: 600;">
+              {desc}
+            </div>
+          </div>
+        </div>
+        """
+
+        folium.CircleMarker(
+            location=[coord[0], coord[1]],
+            radius=16 if reg_name in REGION_MAPPING else 12,
+            color="#FFFFFF",
+            weight=2,
+            fill=True,
+            fill_color=color,
+            fill_opacity=0.88,
+            tooltip=f"<b>{reg_name}</b>: {avg_temp} °C ({desc})",
+            popup=folium.Popup(popup_html, max_width=250)
+        ).add_to(m)
+
+    st_folium(m, width="100%", height=560, returned_objects=[])
+
+
+# ------------------------------------------
+# TAB 2: 區域氣溫走勢與明細
 # ------------------------------------------
 with tab_trend:
     all_regions_db = df_all["regionName"].unique().tolist()
     core_regions = ["北部地區", "中部地區", "南部地區", "東北部地區", "東部地區", "東南部地區", "離島地區"]
 
-    # 排序選單：先放核心區域，再放各縣市
     sorted_options = [r for r in core_regions if r in all_regions_db]
     county_options = [r for r in all_regions_db if r not in core_regions]
     sorted_options.extend(sorted(county_options))
@@ -302,10 +454,8 @@ with tab_trend:
         selected_region = st.selectbox(
             "📍 請選擇預報區域或縣市 (Select Region)：",
             options=sorted_options,
-            index=default_index,
-            help="支援台灣 7 大分區與 22 縣市切換"
+            index=default_index
         )
-
     with col_sel2:
         st.write("")
         st.write("")
@@ -313,13 +463,9 @@ with tab_trend:
         sub_counties = ", ".join(REGION_MAPPING[selected_region]) if is_core_region else selected_region
         st.info(f"涵蓋範圍: **{sub_counties}**")
 
-    # 篩選選定區域的預報數據
     df_region = df_all[df_all["regionName"] == selected_region].sort_values("dataDate").copy()
 
-    if df_region.empty:
-        st.warning(f"目前查無 {selected_region} 的預報資料。")
-    else:
-        # 今日指標卡片 (KPI)
+    if not df_region.empty:
         today_row = df_region.iloc[0]
         today_date = today_row["dataDate"]
         today_min = today_row["minT"]
@@ -329,18 +475,18 @@ with tab_trend:
 
         m1, m2, m3, m4 = st.columns(4)
         with m1:
-            st.metric(label=f"今日最低溫 ({today_date})", value=f"{today_min} °C", delta="清晨/夜間低溫", delta_color="inverse")
+            st.metric(label=f"今日最低溫 ({today_date})", value=f"{today_min} °C")
         with m2:
-            st.metric(label=f"今日最高溫 ({today_date})", value=f"{today_max} °C", delta="日間高溫")
+            st.metric(label=f"今日最高溫 ({today_date})", value=f"{today_max} °C")
         with m3:
-            st.metric(label="今日預估溫差", value=f"{today_diff} °C", delta="溫差提醒")
+            st.metric(label="今日預估溫差", value=f"{today_diff} °C")
         with m4:
-            st.metric(label="未來一週平均溫", value=f"{week_avg} °C", delta="一週趨勢")
+            st.metric(label="未來一週平均溫", value=f"{week_avg} °C")
 
         st.markdown("---")
 
-        # 一週最高與最低氣溫折線圖
-        st.subheader(f"📈 【{selected_region}】未來一週氣溫走向趨勢圖 (Line Chart)")
+        # Altair 深色風格折線圖
+        st.markdown(f"#### 📈 【{selected_region}】未來一週氣溫走勢圖")
 
         df_chart_long = pd.melt(
             df_region,
@@ -356,11 +502,11 @@ with tab_trend:
 
         color_scale = alt.Scale(
             domain=["最高氣溫 (MaxT)", "最低氣溫 (MinT)"],
-            range=["#FF4B4B", "#1E88E5"]
+            range=["#F87171", "#38BDF8"]
         )
 
-        line_chart = alt.Chart(df_chart_long).mark_line(point=True, strokeWidth=3).encode(
-            x=alt.X("dataDate:N", title="預報日期 (Date)", axis=alt.Axis(labelAngle=0)),
+        line_chart = alt.Chart(df_chart_long).mark_line(point=True, strokeWidth=2.8).encode(
+            x=alt.X("dataDate:N", title="預報日期 (Date)", axis=alt.Axis(labelAngle=0, labelColor="#94A3B8", titleColor="#94A3B8")),
             y=alt.Y(
                 "temperature:Q",
                 title="氣溫 (°C)",
@@ -369,9 +515,10 @@ with tab_trend:
                         float(df_region["minT"].min() - 3),
                         float(df_region["maxT"].max() + 3)
                     ]
-                )
+                ),
+                axis=alt.Axis(labelColor="#94A3B8", titleColor="#94A3B8", gridColor="rgba(255,255,255,0.06)")
             ),
-            color=alt.Color("tempType:N", scale=color_scale, legend=alt.Legend(title="氣溫要素")),
+            color=alt.Color("tempType:N", scale=color_scale, legend=alt.Legend(title="氣溫要素", titleColor="#E2E8F0", labelColor="#E2E8F0")),
             tooltip=[
                 alt.Tooltip("dataDate:N", title="日期"),
                 alt.Tooltip("tempType:N", title="要素"),
@@ -383,8 +530,7 @@ with tab_trend:
 
         st.altair_chart(line_chart, use_container_width=True)
 
-        # 詳細預報明細表格
-        st.subheader(f"📋 【{selected_region}】未來一週氣溫明細表 (Data Table)")
+        st.markdown(f"#### 📋 【{selected_region}】預報明細數據")
         df_display = df_region.copy()
         df_display["tempDiff"] = (df_display["maxT"] - df_display["minT"]).round(1)
         df_display["comfortLevel"] = df_display.apply(
@@ -396,170 +542,29 @@ with tab_trend:
             "minT": "最低氣溫 (°C)",
             "maxT": "最高氣溫 (°C)",
             "tempDiff": "日溫差 (°C)",
-            "comfortLevel": "天氣體感建議"
+            "comfortLevel": "天氣體感"
         })
 
         st.dataframe(
-            df_display_clean[["預報日期", "最低氣溫 (°C)", "最高氣溫 (°C)", "日溫差 (°C)", "天氣體感建議"]],
+            df_display_clean[["預報日期", "最低氣溫 (°C)", "最高氣溫 (°C)", "日溫差 (°C)", "天氣體感"]],
             use_container_width=True,
             hide_index=True
         )
 
 
 # ------------------------------------------
-# TAB 2: 台灣地圖視覺化 (Phase 6 - 單元 17 & 18)
-# ------------------------------------------
-with tab_map:
-    st.subheader("🗺️ 台灣各區互動式氣溫地圖 (Folium Map Visualization)")
-    st.caption("點選地圖圓點標記可顯示該地區預報細節；色彩隨平均氣溫動態變化。")
-
-    # 色階圖例說明
-    st.markdown("""
-    <div class="legend-box">
-      <span style="font-weight: 600; margin-right: 8px;">溫度色階圖例：</span>
-      <div class="legend-item"><span class="legend-badge" style="background: #1E88E5;"></span>&lt; 20°C 偏涼/寒冷</div>
-      <div class="legend-item"><span class="legend-badge" style="background: #43A047;"></span>20 ~ 25°C 舒適宜人</div>
-      <div class="legend-item"><span class="legend-badge" style="background: #FDD835;"></span>25 ~ 30°C 暖熱晴朗</div>
-      <div class="legend-item"><span class="legend-badge" style="background: #E53935;"></span>&gt; 30°C 炎熱注意防曬</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    available_dates = sorted(df_all["dataDate"].unique().tolist())
-
-    col_map_ctrl1, col_map_ctrl2 = st.columns([2, 2])
-    with col_map_ctrl1:
-        selected_date = st.selectbox(
-            "📅 選擇預報日期 (Select Date)：",
-            options=available_dates,
-            index=0,
-            help="切換日期以查看該日全台各地溫度分佈"
-        )
-    with col_map_ctrl2:
-        layer_mode = st.radio(
-            "選擇顯示圖層層級：",
-            options=["7 大分區中心標記", "22 縣市詳細標記", "全部顯示"],
-            index=0,
-            horizontal=True
-        )
-
-    # 依選定日期篩選數據
-    df_date = df_all[df_all["dataDate"] == selected_date].copy()
-    df_date["avgT"] = ((df_date["minT"] + df_date["maxT"]) / 2).round(1)
-
-    # 決定地圖要呈現的地點集合
-    if layer_mode == "7 大分區中心標記":
-        df_map_points = df_date[df_date["regionName"].isin(REGION_MAPPING.keys())]
-    elif layer_mode == "22 縣市詳細標記":
-        df_map_points = df_date[~df_date["regionName"].isin(REGION_MAPPING.keys())]
-    else:
-        df_map_points = df_date
-
-    # 建立 Folium 地圖實例 (中心定位於台灣)
-    m = folium.Map(
-        location=[23.75, 120.95],
-        zoom_start=7,
-        tiles="CartoDB positron",
-        control_scale=True
-    )
-
-    # 在地圖上逐一添加圓形標記
-    for _, row in df_map_points.iterrows():
-        reg_name = row["regionName"]
-        min_temp = row["minT"]
-        max_temp = row["maxT"]
-        avg_temp = row["avgT"]
-        color = get_temperature_color(avg_temp)
-        desc = get_comfort_desc(min_temp, max_temp)
-
-        # 取得座標
-        coord = COORDINATES.get(reg_name)
-        if not coord:
-            continue
-
-        # HTML 彈窗
-        popup_html = f"""
-        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto; min-width: 170px;">
-          <h4 style="margin: 0 0 6px 0; color: #1E88E5; border-bottom: 2px solid #E2E8F0; padding-bottom: 4px;">📍 {reg_name}</h4>
-          <div style="font-size: 13px; line-height: 1.6;">
-            <b>預報日期：</b>{selected_date}<br>
-            <b>最低氣溫：</b><span style="color: #1E88E5; font-weight: 600;">{min_temp} °C</span><br>
-            <b>最高氣溫：</b><span style="color: #E53935; font-weight: 600;">{max_temp} °C</span><br>
-            <b>平均氣溫：</b>{avg_temp} °C<br>
-            <div style="margin-top: 6px; padding: 4px 8px; border-radius: 4px; background: {color}; color: white; font-size: 12px; text-align: center;">
-              {desc}
-            </div>
-          </div>
-        </div>
-        """
-
-        folium.CircleMarker(
-            location=[coord[0], coord[1]],
-            radius=15 if reg_name in REGION_MAPPING else 11,
-            color="#FFFFFF",
-            weight=2,
-            fill=True,
-            fill_color=color,
-            fill_opacity=0.88,
-            tooltip=f"<b>{reg_name}</b>: 平均 {avg_temp} °C ({desc})",
-            popup=folium.Popup(popup_html, max_width=250)
-        ).add_to(m)
-
-    # 渲染 Folium 地圖組件
-    st_folium(m, width="100%", height=560, returned_objects=[])
-
-
-# ------------------------------------------
-# TAB 3: 系統架構與規格 (Architecture)
+# TAB 3: 系統架構
 # ------------------------------------------
 with tab_arch:
-    st.subheader("⚙️ 系統管線架構與規格說明 (System Architecture)")
-
-    col_a1, col_a2 = st.columns(2)
-    with col_a1:
-        st.markdown("""
-        #### 🔄 資料生命週期流程
-        1. **資料提取 (Extract)**：
-           - 呼叫中央氣象署 CWA API 資料集 `F-D0047-091`
-           - 透過 HTTP Authorization 標頭安全認證
-        2. **資料轉換 (Transform)**：
-           - 拆解多層深層巢狀 JSON 階層
-           - 萃取 `MinT` / `MaxT` 並清洗為日期結構
-           - 計算全台 7 大分區聚合均值
-        3. **資料持久化 (Load)**：
-           - SQLite3 `data.db` 檔案儲存
-           - `UNIQUE(regionName, dataDate) ON CONFLICT REPLACE` 冪等性防呆
-        4. **前端視覺化 (Visualize)**：
-           - Streamlit 響應式佈局
-           - Altair 雙線動態走勢圖
-           - Folium 台灣四階色溫圖層
-        """)
-
-    with col_a2:
-        st.markdown("""
-        #### 🗄️ 資料庫綱要 (Database Schema)
-        ```sql
-        CREATE TABLE TemperatureForecasts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            regionName TEXT NOT NULL,
-            dataDate TEXT NOT NULL,
-            minT REAL NOT NULL,
-            maxT REAL NOT NULL,
-            UNIQUE(regionName, dataDate) ON CONFLICT REPLACE
-        );
-        ```
-        """)
-
-        st.markdown("""
-        #### 🎯 階段完成進度
-        - [x] **Phase 1**：環境配置與金鑰取得
-        - [x] **Phase 2**：CWA API 資料採集 (Extract)
-        - [x] **Phase 3**：JSON 剖析與清洗 (Transform)
-        - [x] **Phase 4**：SQLite 資料庫落庫 (Load)
-        - [x] **Phase 5**：Streamlit 互動儀表板
-        - [x] **Phase 6**：Folium 地圖地理空間視覺化
-        - [x] **Phase 7**：程式品質優化與防呆
-        - [x] **Phase 8**：Git 版本控制與發布
-        """)
+    st.markdown("#### ⚙️ 系統技術架構規格")
+    st.markdown("""
+    - **UI 風格**：參考 `taiwan-weather-map.vercel.app` 類 Windy 深色玻璃擬態風格。
+    - **底圖圖磚**：CartoDB Dark Matter 深色圖磚套疊。
+    - **光譜調色**：Windy Spectral Color Gradient (`#2c7bb6` ➔ `#d73027`)。
+    - **雙軌架構**：
+      - 本地 / Streamlit Cloud：`app.py`
+      - Vercel Serverless：`vercel.json` + `api/index.py`
+    """)
 
 st.markdown("---")
-st.caption("Taiwan Weather Forecast Dashboard © 2026 | Developed with ❤️ for AIoT Course HW1")
+st.caption("Taiwan Weather Map © 2026 | Inspired by taiwan-weather-map.vercel.app | Built for AIoT HW1")
