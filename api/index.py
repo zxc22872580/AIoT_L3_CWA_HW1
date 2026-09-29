@@ -504,14 +504,13 @@ def generate_windy_style_html(data: List[Dict[str, Any]]) -> str:
         attributionControl: false
       }}).setView([23.75, 120.95], 7.5);
 
-      L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
-        subdomains: 'abcd',
-        maxZoom: 19
+      // ✅ ESRI World Dark Gray Canvas — 完全免費、無需 API Key、不會被封鎖
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
+        maxZoom: 16,
+        attribution: '© Esri, HERE, Garmin, FAO, NOAA, USGS'
       }}).addTo(mapInstance);
 
-      // 移動縮放控制器到右上
       L.control.zoom({{ position: 'topright' }}).addTo(mapInstance);
-
       markerLayerGroup = L.layerGroup().addTo(mapInstance);
     }}
 

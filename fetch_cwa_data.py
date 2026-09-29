@@ -1,8 +1,8 @@
 """
 fetch_cwa_data.py
-中央氣象署 (CWA) 天氣預報資料採集與處理模組 (ETL Pipeline)
-- 階段二：資料採集 (Phase 2: Data Extraction)
-- 階段三：資料剖析與清洗 (Phase 3: Data Transformation)
+中央氣象署 (CWA) 即時自動氣象站觀測資料採集與處理模組 (ETL Pipeline)
+- 資料集：O-A0003-001 (自動氣象站-現在天氣觀測報告)
+- 提供：即時氣溫、今日高低溫、精確站點 GPS 座標、濕度、風速、雨量
 """
 
 import os
@@ -10,7 +10,7 @@ import sys
 import logging
 import requests
 import urllib3
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import pandas as pd
 from dotenv import load_dotenv
 
@@ -35,7 +35,8 @@ load_dotenv()
 
 # 氣象署 Open Data API 常數定義
 CWA_API_BASE_URL = "https://opendata.cwa.gov.tw/api/v1/rest/datastore"
-DEFAULT_DATASET_ID = "F-D0047-091"  # 臺灣各縣市未來 1 週天氣預報
+DEFAULT_DATASET_ID = "O-A0003-001"  # 自動氣象站 - 現在天氣觀測報告 (即時)
+
 
 # 台灣區域與縣市映射關係 (依據中央氣象預報分區標準)
 REGION_MAPPING: Dict[str, List[str]] = {
@@ -63,164 +64,161 @@ def get_api_key() -> str:
 def fetch_weather_data(
     api_key: Optional[str] = None,
     dataset_id: str = DEFAULT_DATASET_ID,
-    timeout: int = 15
+    timeout: int = 20
 ) -> Dict[str, Any]:
     """
     【階段二：資料採集】
-    從中央氣象署 CWA Open Data API 取得指定資料集之原始 JSON 資料。
+    從中央氣象署 CWA Open Data API 取得 O-A0003-001 即時觀測原始 JSON 資料。
     """
     if not api_key:
         api_key = get_api_key()
 
     url = f"{CWA_API_BASE_URL}/{dataset_id}"
-    headers = {
-        "Authorization": api_key,
-        "accept": "application/json"
-    }
+    params = {"Authorization": api_key, "format": "JSON"}
 
-    logger.info(f"正在向 CWA API 請求資料集 [{dataset_id}]...")
+    logger.info(f"正在向 CWA API 請求資料集 [{dataset_id}] (即時自動氣象站觀測)...")
 
     try:
-        response = requests.get(url, headers=headers, timeout=timeout)
+        response = requests.get(url, params=params, timeout=timeout)
         response.raise_for_status()
     except requests.exceptions.SSLError:
-        logger.warning("標準 SSL 驗證失敗，切換為相容模式發送請求...")
+        logger.warning("標準 SSL 驗證失敗，切換為相容模式...")
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        response = requests.get(url, headers=headers, verify=False, timeout=timeout)
+        response = requests.get(url, params=params, verify=False, timeout=timeout)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         logger.error(f"API 請求失敗: {e}")
         raise
 
     raw_json = response.json()
-
     is_success = str(raw_json.get("success", "")).lower() == "true"
     if not is_success:
-        msg = raw_json.get("message", "API 回應未成功")
-        raise RuntimeError(f"CWA API 回應錯誤: {msg}")
+        raise RuntimeError(f"CWA API 回應錯誤: {raw_json.get('message', '未知錯誤')}")
 
-    logger.info(f"成功取得資料集 [{dataset_id}]！大小: {len(response.content) / 1024:.2f} KB")
+    station_count = len(raw_json.get("records", {}).get("Station", []))
+    logger.info(f"成功取得 [{dataset_id}]！共 {station_count} 個氣象站。")
     return raw_json
 
 
-def parse_weather_data(raw_json: Dict[str, Any], include_counties: bool = True) -> pd.DataFrame:
+def _safe_float(value: Any, sentinel: float = -90.0) -> Optional[float]:
+    """安全轉換為 float，低於 sentinel（無效值）回傳 None。"""
+    try:
+        f = float(value)
+        return None if f <= sentinel else f
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_observation_data(raw_json: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    【階段三：資料剖析與清洗】
-    解析 CWA 原始巢狀 JSON 資料，提取一週各地最高氣溫 (MaxT) 與最低氣溫 (MinT)，
-    並依據區域進行彙整計算，回傳乾淨結構化的 Pandas DataFrame。
+    【階段三：資料剖析與清洗 — O-A0003-001 專用】
+    解析自動氣象站即時觀測 JSON，提取：
+    - 站名、縣市、精確 WGS84 GPS 座標
+    - 即時氣溫、今日高低溫、濕度、風速、雨量、天氣描述
 
-    :param raw_json: fetch_weather_data 回傳之字典物件
-    :param include_counties: 是否一併保留各縣市明細 (預設為 True)
-    :return: 包含 regionName, dataDate, minT, maxT 之 DataFrame
+    回傳 (df_stations, df_summary)：
+    - df_stations : 完整站點明細 (每站一行)
+    - df_summary  : 縣市 + 七大分區彙整 (相容舊版 TemperatureForecasts 結構)
     """
-    logger.info("開始執行階段三：解析巢狀 JSON 並清洗氣象數據...")
+    logger.info("開始執行階段三：解析 O-A0003-001 即時觀測 JSON...")
 
-    records = raw_json.get("records", {})
-    locations_list = records.get("Locations", records.get("locations", []))
+    stations = raw_json.get("records", {}).get("Station", [])
+    if not stations:
+        raise ValueError("JSON 結構異常：找不到 records.Station 資料節點")
 
-    if not locations_list:
-        raise ValueError("JSON 結構異常：找不到 Records.Locations 資料節點")
+    rows: List[Dict[str, Any]] = []
+    for s in stations:
+        try:
+            station_name = s.get("StationName", "").strip()
+            county_name  = s.get("GeoInfo", {}).get("CountyName", "").strip()
+            obs_time     = s.get("ObsTime", {}).get("DateTime", "")
 
-    location_items = locations_list[0].get("Location", locations_list[0].get("location", []))
-    if not location_items:
-        raise ValueError("JSON 結構異常：找不到 Location 清單")
+            # WGS84 座標
+            lat = lon = None
+            for coord in s.get("GeoInfo", {}).get("Coordinates", []):
+                if coord.get("CoordinateName") == "WGS84":
+                    lat = _safe_float(coord.get("StationLatitude"))
+                    lon = _safe_float(coord.get("StationLongitude"))
+                    break
+            if lat is None or lon is None:
+                continue
 
-    county_rows: List[Dict[str, Any]] = []
+            we = s.get("WeatherElement", {})
+            obs_temp     = _safe_float(we.get("AirTemperature"))
+            humidity     = _safe_float(we.get("RelativeHumidity"))
+            wind_speed   = _safe_float(we.get("WindSpeed"))
+            precipitation = _safe_float(we.get("Now", {}).get("Precipitation"))
+            weather_desc = we.get("Weather", "")
 
-    # 1. 逐一縣市提取最低溫與最高溫
-    for loc in location_items:
-        location_name = loc.get("LocationName", loc.get("locationName", "")).strip()
-        weather_elements = loc.get("WeatherElement", loc.get("weatherElement", []))
+            max_t = _safe_float(
+                we.get("DailyExtreme", {}).get("DailyHigh", {})
+                  .get("TemperatureInfo", {}).get("AirTemperature")
+            ) or obs_temp
+            min_t = _safe_float(
+                we.get("DailyExtreme", {}).get("DailyLow", {})
+                  .get("TemperatureInfo", {}).get("AirTemperature")
+            ) or obs_temp
 
-        # 用於收集各日期的最低溫與最高溫清單
-        daily_min: Dict[str, List[float]] = {}
-        daily_max: Dict[str, List[float]] = {}
-
-        for elem in weather_elements:
-            elem_name = elem.get("ElementName", elem.get("elementName", "")).strip()
-
-            # 最低溫判斷 (MinT / 最低溫度 / MinTemperature)
-            if elem_name in ["最低溫度", "MinTemperature", "MinT"]:
-                for t in elem.get("Time", elem.get("time", [])):
-                    start_time = t.get("StartTime", t.get("startTime", ""))
-                    if not start_time:
-                        continue
-                    date_str = start_time.split("T")[0]
-                    vals = t.get("ElementValue", t.get("elementValue", []))
-                    if vals:
-                        val_raw = vals[0].get("MinTemperature", vals[0].get("value", None))
-                        try:
-                            val_float = float(val_raw)
-                            daily_min.setdefault(date_str, []).append(val_float)
-                        except (ValueError, TypeError):
-                            continue
-
-            # 最高溫判斷 (MaxT / 最高溫度 / MaxTemperature)
-            elif elem_name in ["最高溫度", "MaxTemperature", "MaxT"]:
-                for t in elem.get("Time", elem.get("time", [])):
-                    start_time = t.get("StartTime", t.get("startTime", ""))
-                    if not start_time:
-                        continue
-                    date_str = start_time.split("T")[0]
-                    vals = t.get("ElementValue", t.get("elementValue", []))
-                    if vals:
-                        val_raw = vals[0].get("MaxTemperature", vals[0].get("value", None))
-                        try:
-                            val_float = float(val_raw)
-                            daily_max.setdefault(date_str, []).append(val_float)
-                        except (ValueError, TypeError):
-                            continue
-
-        # 計算該縣市當日的總體 minT 與 maxT
-        common_dates = sorted(set(daily_min.keys()) & set(daily_max.keys()))
-        for d in common_dates:
-            county_rows.append({
-                "regionName": location_name,
-                "dataDate": d,
-                "minT": round(float(min(daily_min[d])), 1),
-                "maxT": round(float(max(daily_max[d])), 1),
+            rows.append({
+                "stationName": station_name,
+                "countyName":  county_name,
+                "lat": lat, "lon": lon,
+                "obsTime": obs_time,
+                "dataDate": obs_time[:10] if obs_time else "",
+                "obsTemp": round(obs_temp, 1) if obs_temp is not None else None,
+                "minT":    round(min_t, 1)    if min_t    is not None else None,
+                "maxT":    round(max_t, 1)    if max_t    is not None else None,
+                "humidity": humidity,
+                "windSpeed": wind_speed,
+                "precipitation": precipitation,
+                "weather": weather_desc,
             })
+        except Exception as ex:
+            logger.warning(f"解析站點 [{s.get('StationName','')}] 失敗，跳過: {ex}")
 
-    df_counties = pd.DataFrame(county_rows)
-    if df_counties.empty:
-        raise ValueError("未能自 API 資料中擷取出任何氣溫記錄，請檢查資料結構。")
+    df_stations = pd.DataFrame(rows).dropna(subset=["obsTemp"])
+    if df_stations.empty:
+        raise ValueError("未能自 O-A0003-001 擷取出任何有效站點記錄")
+    logger.info(f"有效站點：{len(df_stations)} 個")
 
-    # 2. 彙整計算六大區域預報平均數據 (北部、中部、南部、東北部、東部、東南部、離島)
+    # ── 縣市彙整 ──
+    county_agg = (
+        df_stations.dropna(subset=["minT", "maxT"])
+        .groupby(["countyName", "dataDate"])
+        .agg(obsTemp=("obsTemp", "mean"), minT=("minT", "min"), maxT=("maxT", "max"))
+        .reset_index().rename(columns={"countyName": "regionName"})
+    )
+    for col in ["obsTemp", "minT", "maxT"]:
+        county_agg[col] = county_agg[col].round(1)
+
+    # ── 七大分區彙整 ──
     regional_rows: List[Dict[str, Any]] = []
     for region_name, county_list in REGION_MAPPING.items():
-        sub_df = df_counties[df_counties["regionName"].isin(county_list)]
-        if not sub_df.empty:
-            grouped = sub_df.groupby("dataDate").agg({"minT": "mean", "maxT": "mean"}).reset_index()
-            for _, row in grouped.iterrows():
+        sub = county_agg[county_agg["regionName"].isin(county_list)]
+        if not sub.empty:
+            for date, grp in sub.groupby("dataDate"):
                 regional_rows.append({
-                    "regionName": region_name,
-                    "dataDate": row["dataDate"],
-                    "minT": round(float(row["minT"]), 1),
-                    "maxT": round(float(row["maxT"]), 1),
+                    "regionName": region_name, "dataDate": date,
+                    "obsTemp": round(float(grp["obsTemp"].mean()), 1),
+                    "minT":    round(float(grp["minT"].min()),    1),
+                    "maxT":    round(float(grp["maxT"].max()),    1),
                 })
 
-    df_regions = pd.DataFrame(regional_rows)
-
-    # 3. 依參數決定是否合併區域與個別縣市資料
-    if include_counties:
-        df_final = pd.concat([df_regions, df_counties], ignore_index=True)
-    else:
-        df_final = df_regions
-
-    # 型態確認與排序
-    df_final["regionName"] = df_final["regionName"].astype(str)
-    df_final["dataDate"] = df_final["dataDate"].astype(str)
-    df_final["minT"] = df_final["minT"].astype(float)
-    df_final["maxT"] = df_final["maxT"].astype(float)
-
-    # 依地區與日期排序
-    df_final = df_final.sort_values(by=["regionName", "dataDate"]).reset_index(drop=True)
+    df_regions  = pd.DataFrame(regional_rows)
+    df_summary  = pd.concat([df_regions, county_agg], ignore_index=True)
+    df_summary  = df_summary.sort_values(["regionName", "dataDate"]).reset_index(drop=True)
 
     logger.info(
-        f"階段三完成：共產生 {len(df_final)} 筆清洗後預報記錄 "
-        f"({len(df_regions)} 筆區域匯總, {len(df_counties)} 筆縣市明細)"
+        f"階段三完成：{len(df_stations)} 站點 → "
+        f"{len(df_regions)} 區域 + {len(county_agg)} 縣市 彙整記錄"
     )
-    return df_final
+    return df_stations, df_summary
+
+
+def parse_weather_data(raw_json: Dict[str, Any], include_counties: bool = True) -> pd.DataFrame:
+    """向後相容包裝：回傳彙整 DataFrame，供舊版 app.py 呼叫。"""
+    _, df_summary = parse_observation_data(raw_json)
+    return df_summary
 
 
 # ==========================================
@@ -231,99 +229,148 @@ DB_PATH = "data.db"
 
 
 def init_database(db_path: str = DB_PATH) -> None:
-    """
-    初始化 SQLite 資料庫與建立 TemperatureForecasts 資料表。
-    設定 UNIQUE(regionName, dataDate) 以支援防重複寫入 (冪等性)。
-    """
+    """初始化 SQLite 資料庫，建立彙整表與站點觀測表。"""
     import sqlite3
     logger.info(f"正在初始化 SQLite 資料庫 [{db_path}]...")
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
+        # 彙整溫度表 (相容舊版，新增 obsTemp 欄)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS TemperatureForecasts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 regionName TEXT NOT NULL,
                 dataDate TEXT NOT NULL,
+                obsTemp REAL,
                 minT REAL NOT NULL,
                 maxT REAL NOT NULL,
                 UNIQUE(regionName, dataDate) ON CONFLICT REPLACE
             );
         """)
+        # 即時站點觀測表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS StationObservations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stationName TEXT NOT NULL,
+                countyName TEXT,
+                lat REAL, lon REAL,
+                obsTime TEXT, dataDate TEXT,
+                obsTemp REAL, minT REAL, maxT REAL,
+                humidity REAL, windSpeed REAL, precipitation REAL, weather TEXT,
+                UNIQUE(stationName, obsTime) ON CONFLICT REPLACE
+            );
+        """)
         conn.commit()
-    logger.info("資料庫與資料表結構初始化完成。")
+    logger.info("資料庫初始化完成。")
 
 
-def save_to_database(df: pd.DataFrame, db_path: str = DB_PATH) -> int:
-    """
-    將清洗後的 DataFrame 資料寫入 SQLite 資料庫。
-    使用 INSERT OR REPLACE INTO 確保重複執行不產生重複數據。
-
-    :param df: 包含 regionName, dataDate, minT, maxT 之 DataFrame
-    :param db_path: 資料庫檔案路徑
-    :return: 成功寫入或更新的筆數
-    """
+def save_to_database(
+    df: pd.DataFrame,
+    db_path: str = DB_PATH,
+    stations_df: pd.DataFrame = None
+) -> int:
+    """將彙整 DataFrame 寫入 TemperatureForecasts，並選擇性地寫入站點明細。"""
     import sqlite3
     init_database(db_path)
-
-    logger.info(f"正在將 {len(df)} 筆預報數據寫入資料庫 [{db_path}]...")
-    records_to_insert = [
-        (row["regionName"], row["dataDate"], float(row["minT"]), float(row["maxT"]))
-        for _, row in df.iterrows()
-    ]
-
-    sql = """
-        INSERT INTO TemperatureForecasts (regionName, dataDate, minT, maxT)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(regionName, dataDate) DO UPDATE SET
-            minT = excluded.minT,
-            maxT = excluded.maxT;
-    """
+    logger.info(f"正在將 {len(df)} 筆彙整數據寫入 [{db_path}]...")
 
     with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.executemany(sql, records_to_insert)
+        records = [
+            (
+                str(row.get("regionName", "")),
+                str(row.get("dataDate", "")),
+                float(row["obsTemp"]) if pd.notna(row.get("obsTemp")) else None,
+                float(row["minT"]) if pd.notna(row.get("minT")) else 0.0,
+                float(row["maxT"]) if pd.notna(row.get("maxT")) else 0.0,
+            )
+            for _, row in df.iterrows()
+        ]
+        conn.executemany("""
+            INSERT INTO TemperatureForecasts (regionName, dataDate, obsTemp, minT, maxT)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(regionName, dataDate) DO UPDATE SET
+                obsTemp = excluded.obsTemp,
+                minT = excluded.minT,
+                maxT = excluded.maxT;
+        """, records)
+
+        if stations_df is not None and not stations_df.empty:
+            st_recs = [
+                (
+                    str(r.get("stationName", "")), str(r.get("countyName", "")),
+                    float(r["lat"]) if pd.notna(r.get("lat")) else None,
+                    float(r["lon"]) if pd.notna(r.get("lon")) else None,
+                    str(r.get("obsTime", "")), str(r.get("dataDate", "")),
+                    float(r["obsTemp"]) if pd.notna(r.get("obsTemp")) else None,
+                    float(r["minT"])    if pd.notna(r.get("minT"))    else None,
+                    float(r["maxT"])    if pd.notna(r.get("maxT"))    else None,
+                    float(r["humidity"]) if pd.notna(r.get("humidity")) else None,
+                    float(r["windSpeed"]) if pd.notna(r.get("windSpeed")) else None,
+                    float(r["precipitation"]) if pd.notna(r.get("precipitation")) else None,
+                    str(r.get("weather", "")),
+                )
+                for _, r in stations_df.iterrows()
+            ]
+            conn.executemany("""
+                INSERT INTO StationObservations
+                    (stationName,countyName,lat,lon,obsTime,dataDate,
+                     obsTemp,minT,maxT,humidity,windSpeed,precipitation,weather)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(stationName,obsTime) DO UPDATE SET
+                    obsTemp=excluded.obsTemp, minT=excluded.minT, maxT=excluded.maxT,
+                    humidity=excluded.humidity, windSpeed=excluded.windSpeed,
+                    precipitation=excluded.precipitation, weather=excluded.weather;
+            """, st_recs)
+            logger.info(f"站點資料落庫：{len(st_recs)} 筆")
+
         conn.commit()
 
-    logger.info(f"成功落庫 {len(records_to_insert)} 筆數據至 [{db_path}]！")
-    return len(records_to_insert)
+    logger.info(f"彙整資料落庫完成：{len(records)} 筆")
+    return len(records)
 
 
 def verify_database(db_path: str = DB_PATH) -> None:
     """驗證資料庫內容並輸出檢查報告。"""
     import sqlite3
-    logger.info(f"正在驗證資料庫 [{db_path}] 落庫內容...")
+    logger.info(f"正在驗證資料庫 [{db_path}]...")
     with sqlite3.connect(db_path) as conn:
         total_count = conn.execute("SELECT COUNT(*) FROM TemperatureForecasts;").fetchone()[0]
+        try:
+            station_count = conn.execute("SELECT COUNT(*) FROM StationObservations;").fetchone()[0]
+        except Exception:
+            station_count = 0
         distinct_regions = [
             row[0] for row in conn.execute(
                 "SELECT DISTINCT regionName FROM TemperatureForecasts ORDER BY regionName;"
             ).fetchall()
         ]
-        sample_central = pd.read_sql_query(
-            "SELECT * FROM TemperatureForecasts WHERE regionName = '中部地區' ORDER BY dataDate ASC;",
+        sample = pd.read_sql_query(
+            "SELECT regionName, dataDate, obsTemp, minT, maxT "
+            "FROM TemperatureForecasts "
+            "WHERE regionName IN ('北部地區','中部地區','南部地區') "
+            "ORDER BY regionName, dataDate LIMIT 9;",
             conn
         )
 
     print("\n" + "=" * 65)
-    print("  🗄️ SQLite 資料庫 (Phase 4) 落庫驗證結果")
+    print("  🗄️  SQLite 資料庫 (O-A0003-001 即時站點) 落庫驗證結果")
     print("=" * 65)
-    print(f"  • 資料庫路徑   : {os.path.abspath(db_path)}")
-    print(f"  • 總儲存筆數   : {total_count} 筆")
-    print(f"  • 涵蓋地區數   : {len(distinct_regions)} 個")
-    print(f"  • 資料庫地區清單: {', '.join(distinct_regions[:8])} ...")
-    print("\n--- 【SQL 查詢驗證：中部地區資料】---")
-    print(sample_central.to_string(index=False))
+    print(f"  • 資料庫路徑    : {os.path.abspath(db_path)}")
+    print(f"  • 彙整記錄筆數  : {total_count} 筆")
+    print(f"  • 站點觀測筆數  : {station_count} 筆")
+    print(f"  • 涵蓋地區 ({len(distinct_regions)}): {', '.join(distinct_regions)}")
+    print("\n--- 【分區彙整樣本：北/中/南部地區】---")
+    print(sample.to_string(index=False))
     print("=" * 65 + "\n")
 
 
 def run_etl_pipeline(db_path: str = DB_PATH) -> pd.DataFrame:
-    """執行完整 ETL 管線：採集 ➔ 清洗 ➔ 落庫。"""
+    """執行完整 ETL 管線：採集 O-A0003-001 ➔ 解析 ➔ 落庫。"""
     api_key = get_api_key()
-    raw_data = fetch_weather_data(api_key=api_key)
-    df = parse_weather_data(raw_data, include_counties=True)
-    save_to_database(df, db_path=db_path)
+    raw_data = fetch_weather_data(api_key=api_key, dataset_id=DEFAULT_DATASET_ID)
+    df_stations, df_summary = parse_observation_data(raw_data)
+    save_to_database(df_summary, db_path=db_path, stations_df=df_stations)
     verify_database(db_path=db_path)
-    return df
+    return df_summary
 
 
 def main():

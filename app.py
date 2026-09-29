@@ -339,8 +339,8 @@ df_date["avgT"] = ((df_date["minT"] + df_date["maxT"]) / 2).round(1)
 m = folium.Map(
     location=[23.75, 120.95],
     zoom_start=7,
-    tiles="https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png",
-    attr="&copy; Stadia Maps &copy; OpenMapTiles &copy; OpenStreetMap",
+    tiles="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+    attr="&copy; <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors &copy; <a href='https://carto.com/attributions'>CARTO</a>",
     control_scale=False,
     zoom_control=True,
     prefer_canvas=True,
