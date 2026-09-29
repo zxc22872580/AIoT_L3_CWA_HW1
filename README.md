@@ -16,7 +16,8 @@
 
 ---
 #Demo Website (網站展示)
-<img width="896" height="617" alt="image" src="https://github.com/user-attachments/assets/b6fd2752-f697-44e6-a835-93e6f0688b9b" />
+<img width="1901" height="978" alt="image" src="https://github.com/user-attachments/assets/b3d859c1-c449-4b73-bd7e-67b07644f8ef" />
+
 
 ## 📖 目錄 (Table of Contents)
 
